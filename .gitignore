@@ -1,0 +1,4 @@
+clipbridge
+*.new
+.DS_Store
+.build/
