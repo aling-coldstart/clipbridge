@@ -113,7 +113,13 @@ if (\$isAdmin) {
     \$file = Join-Path \$dir 'authorized_keys'
 }
 if (-not (Test-Path -LiteralPath \$file) -or -not (Select-String -LiteralPath \$file -SimpleMatch \$key -Quiet)) {
-    Add-Content -LiteralPath \$file -Value \$key -Encoding ascii
+    # Start on a fresh line if the file was saved without a trailing newline.
+    \$sep = ''
+    if ((Test-Path -LiteralPath \$file) -and (Get-Item -LiteralPath \$file).Length -gt 0) {
+        \$bytes = [IO.File]::ReadAllBytes(\$file)
+        if (\$bytes[-1] -ne 10) { \$sep = "\`r\`n" }
+    }
+    Add-Content -LiteralPath \$file -Value (\$sep + \$key) -Encoding ascii
 }
 if (\$isAdmin) { icacls \$file /inheritance:r /grant '*S-1-5-32-544:F' /grant '*S-1-5-18:F' | Out-Null }
 "key installed in \$file"
