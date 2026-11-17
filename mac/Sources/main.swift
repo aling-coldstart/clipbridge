@@ -57,9 +57,13 @@ final class ClipSync {
     }
 
     private func send(_ clip: OutgoingClip) {
+        let large = clip.bytes >= Config.notifyBytes
+        let what = "\(clip.fileURLs.count) 个文件（\(formatBytes(clip.bytes))）"
+        if large { notify("正在发送 \(what) 到 Windows…") }
         io.async {
             if Remote.push(clip) {
                 log("mac -> win: \(clip.kind.rawValue) (\(clip.id))")
+                if large { notify("\(what) 已到 Windows，可以粘贴了") }
             } else {
                 DispatchQueue.main.async { if self.pending == nil { self.pending = clip } }
             }
@@ -76,6 +80,9 @@ final class ClipSync {
         let parts = text.split(separator: " ")
         if parts.count == 2, parts[0] == "TOOLARGE", let size = Int64(parts[1]) {
             tooLarge(size, from: "Windows")
+        } else if parts.count == 3, parts[0] == "SENDING", let count = Int(parts[1]), let size = Int64(parts[2]) {
+            log("windows is sending \(count) files, \(size) bytes")
+            notify("正在从 Windows 接收 \(count) 个文件（\(formatBytes(size))）…")
         } else {
             log("windows notice: \(text)")
         }
@@ -90,6 +97,8 @@ final class ClipSync {
                 self.ownCount = self.pb.changeCount
                 self.lastCount = self.ownCount
                 log("win -> mac: \(kind.rawValue) (\(id))")
+                let bytes = kind == .files ? diskSize(of: dir) : 0
+                if bytes >= Config.notifyBytes { notify("Windows 的文件（\(formatBytes(bytes))）已到 Mac，可以粘贴了") }
             } catch {
                 log("apply \(id) failed: \(error)")
             }

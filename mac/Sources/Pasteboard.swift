@@ -11,6 +11,8 @@ struct OutgoingClip {
     let kind: ClipKind
     let dir: URL
     let fileURLs: [URL]
+    /// Total size of `fileURLs` (0 for text and image clips).
+    let bytes: Int64
 }
 
 enum CaptureResult {
@@ -58,10 +60,11 @@ func captureClip(from pb: NSPasteboard) throws -> CaptureResult {
     let fileURLs = (pb.readObjects(forClasses: [NSURL.self], options: options) as? [URL]) ?? []
 
     let kind: ClipKind
+    var bytes: Int64 = 0
     try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     if !fileURLs.isEmpty {
-        let size = totalSize(of: fileURLs)
-        if size > Config.maxFileBytes { try? FileManager.default.removeItem(at: dir); return .tooLarge(size) }
+        bytes = totalSize(of: fileURLs)
+        if bytes > Config.maxFileBytes { try? FileManager.default.removeItem(at: dir); return .tooLarge(bytes) }
         kind = .files
     } else if let text = pb.string(forType: .string), !text.isEmpty {
         try text.write(to: dir.appendingPathComponent("text.txt"), atomically: true, encoding: .utf8)
@@ -74,7 +77,7 @@ func captureClip(from pb: NSPasteboard) throws -> CaptureResult {
         return .skipped("no text, image or files")
     }
     try kind.rawValue.write(to: dir.appendingPathComponent("kind.txt"), atomically: true, encoding: .utf8)
-    return .clip(OutgoingClip(id: id, kind: kind, dir: dir, fileURLs: kind == .files ? fileURLs : []))
+    return .clip(OutgoingClip(id: id, kind: kind, dir: dir, fileURLs: kind == .files ? fileURLs : [], bytes: bytes))
 }
 
 /// Put a clip folder received from Windows onto the pasteboard. Returns its kind.

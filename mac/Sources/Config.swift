@@ -22,6 +22,8 @@ enum Config {
         return mb * 1024 * 1024
     }()
     static let keepClips = 10
+    /// File copies at least this big get "transferring" / "ready to paste" notifications.
+    static let notifyBytes: Int64 = 20 * 1024 * 1024
     static let maxLogBytes: UInt64 = 5 * 1024 * 1024
 
     /// Folder name under %USERPROFILE% on Windows, and the scheduled task that runs the listener.
@@ -96,7 +98,10 @@ func formatBytes(_ bytes: Int64) -> String {
 /// Show a macOS notification. Text goes in as an argument, never into the script source.
 func notify(_ message: String) {
     let script = "on run argv\ndisplay notification (item 1 of argv) with title \"ClipBridge\"\nend run"
-    _ = runTool("/usr/bin/osascript", ["-e", script, message])
+    DispatchQueue.global(qos: .utility).async {
+        let result = runTool("/usr/bin/osascript", ["-e", script, message])
+        if !result.ok { log("notification failed: \(result.output)") }
+    }
 }
 
 /// launchd appends to the log forever; start fresh once it passes the size cap.
