@@ -185,8 +185,14 @@ EOF
   plutil -lint "$PLIST" >/dev/null || die "Generated plist is invalid."
   LOG_LINES_BEFORE=0
   if [[ -f $LOG ]]; then LOG_LINES_BEFORE=$(wc -l <"$LOG" | tr -d ' '); fi
-  launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
-  launchctl bootstrap "gui/$(id -u)" "$PLIST" || die "launchctl bootstrap failed."
+  local domain; domain="gui/$(id -u)"
+  launchctl bootout "$domain/$LABEL" 2>/dev/null || true
+  # bootout returns before the old agent is gone; bootstrapping too early fails with error 5.
+  for _ in $(seq 1 20); do
+    launchctl print "$domain/$LABEL" >/dev/null 2>&1 || break
+    sleep 0.5
+  done
+  launchctl bootstrap "$domain" "$PLIST" || die "launchctl bootstrap failed."
 }
 
 wait_connected() {
