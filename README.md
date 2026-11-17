@@ -6,6 +6,8 @@ Two-way clipboard sync (text, images, files) between a Mac and a Windows PC over
 
 - 在 Mac 上按 ⌘C，到 Windows 上按 Ctrl+V，反过来也一样。
 - 文件可以在访达和资源管理器之间直接复制粘贴，单次最大 2 GB（可调整）。超过上限时 Mac 会弹出通知。
+- 以最后一次复制为准：大文件还没传完时又复制了别的内容（在哪台电脑上复制都算），旧的传输会立即取消，不会白传。
+- Windows 锁屏时剪贴板无法写入，从 Mac 发来的内容会先暂存，解锁后自动放进剪贴板。
 - 传输 20 MB 以上的文件时，Mac 右上角会显示一个进度窗口（两个方向都有），显示百分比、速度和剩余时间，传完显示"可以粘贴了"后自动消失。
 - 通常 1 秒内到达。
 - 连不上 Windows 时几乎不占资源：重试间隔从 2 秒逐步拉长，最长 60 秒一次。
@@ -88,7 +90,7 @@ powershell -File %USERPROFILE%\clipbridge\uninstall-windows.ps1
 | 日志 | `~/Library/Logs/clipbridge.log` | `%USERPROFILE%\clipbridge\listener.log` |
 | 临时数据 | `~/.local/share/clipbridge/` | `%USERPROFILE%\clipbridge\inbox`、`outbox` |
 
-两端的日志超过 5 MB 时都会自动清空或轮转。临时数据只保留最近几份，并且旧的那几份加起来不超过大小上限；最近一份始终保留，因为剪贴板里的文件可能还指向它。
+两端的日志超过 5 MB 时都会自动清空或轮转。临时数据只保留最近几份，并且旧的那几份加起来不超过大小上限；最近一份会保留，因为剪贴板里的文件可能还指向它。超过 24 小时的临时数据会全部自动删除，包括最近一份。
 
 ## 故障排查
 

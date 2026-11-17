@@ -1,18 +1,23 @@
 import Foundation
 
 struct CommandResult {
+    static let cancelledStatus: Int32 = -2
+    static let cancelled = CommandResult(status: cancelledStatus, output: "cancelled")
+
     let status: Int32
     let output: String
     var ok: Bool { status == 0 }
+    var wasCancelled: Bool { status == Self.cancelledStatus }
 }
 
 /// How often transfers report progress.
 let progressInterval: TimeInterval = 0.25
 
 /// Run a tool to completion. With `whileRunning`, calls it every `progressInterval`
-/// until the tool exits (used to report how much of a download has landed).
+/// until the tool exits (used to report how much of a download has landed); if it
+/// returns false the tool is stopped and the result is `.cancelled`.
 @discardableResult
-func runTool(_ path: String, _ args: [String], whileRunning: (() -> Void)? = nil) -> CommandResult {
+func runTool(_ path: String, _ args: [String], whileRunning: (() -> Bool)? = nil) -> CommandResult {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: path)
     process.arguments = args
@@ -32,14 +37,20 @@ func runTool(_ path: String, _ args: [String], whileRunning: (() -> Void)? = nil
         data = pipe.fileHandleForReading.readDataToEndOfFile()
         reading.leave()
     }
+    var stopped = false
     if let tick = whileRunning {
         while process.isRunning {
-            tick()
+            if !tick() {
+                process.terminate()
+                stopped = true
+                break
+            }
             Thread.sleep(forTimeInterval: progressInterval)
         }
     }
     reading.wait()
     process.waitUntilExit()
+    if stopped { return .cancelled }
     let text = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
     return CommandResult(status: process.terminationStatus, output: text)
 }
@@ -50,17 +61,19 @@ func ssh(_ remoteCommand: String) -> CommandResult {
 }
 
 @discardableResult
-func scp(_ args: [String], whileRunning: (() -> Void)? = nil) -> CommandResult {
+func scp(_ args: [String], whileRunning: (() -> Bool)? = nil) -> CommandResult {
     runTool("/usr/bin/scp", Config.sshOptions + ["-q", "-r"] + args, whileRunning: whileRunning)
 }
 
 /// Run `producer | consumer` and return the combined result (fails if either fails).
 /// Bytes are relayed through this process so `progress` can report how many have
-/// passed, at most every `progressInterval`.
+/// passed, at most every `progressInterval`. When `isCancelled` turns true both
+/// processes are stopped and the result is `.cancelled`.
 func runPipeline(producer: (path: String, args: [String]),
                  consumer: (path: String, args: [String]),
                  environment: [String: String] = [:],
-                 progress: ((Int64) -> Void)? = nil) -> CommandResult {
+                 progress: ((Int64) -> Void)? = nil,
+                 isCancelled: (() -> Bool)? = nil) -> CommandResult {
     let first = Process()
     first.executableURL = URL(fileURLWithPath: producer.path)
     first.arguments = producer.args
@@ -92,8 +105,14 @@ func runPipeline(producer: (path: String, args: [String]),
     try? toConsumer.fileHandleForReading.close()
     let relaying = DispatchGroup()
     relaying.enter()
+    var stopped = false
     Thread.detachNewThread {
-        relay(from: fromProducer.fileHandleForReading, to: toConsumer.fileHandleForWriting, progress: progress)
+        stopped = relay(from: fromProducer.fileHandleForReading, to: toConsumer.fileHandleForWriting,
+                        progress: progress, isCancelled: isCancelled)
+        if stopped {
+            first.terminate()
+            second.terminate()
+        }
         relaying.leave()
     }
     let data = output.fileHandleForReading.readDataToEndOfFile()
@@ -102,12 +121,15 @@ func runPipeline(producer: (path: String, args: [String]),
     first.waitUntilExit()
     second.waitUntilExit()
     let text = String(decoding: errData + data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+    if stopped { return .cancelled }
     let status = first.terminationStatus != 0 ? first.terminationStatus : second.terminationStatus
     return CommandResult(status: status, output: text)
 }
 
 /// Copy until EOF (or until the reader goes away), then close the write end.
-private func relay(from source: FileHandle, to sink: FileHandle, progress: ((Int64) -> Void)?) {
+/// Returns true if it stopped because `isCancelled` said so.
+private func relay(from source: FileHandle, to sink: FileHandle,
+                   progress: ((Int64) -> Void)?, isCancelled: (() -> Bool)?) -> Bool {
     let chunk = 1 << 20
     var total: Int64 = 0
     var lastReport = Date.distantPast
@@ -116,8 +138,9 @@ private func relay(from source: FileHandle, to sink: FileHandle, progress: ((Int
         progress?(total)
     }
     while true {
-        guard let data = try? source.read(upToCount: chunk), !data.isEmpty else { return }
-        do { try sink.write(contentsOf: data) } catch { return }   // consumer exited
+        if isCancelled?() == true { return true }
+        guard let data = try? source.read(upToCount: chunk), !data.isEmpty else { return false }
+        do { try sink.write(contentsOf: data) } catch { return false }   // consumer exited
         total += Int64(data.count)
         if let report = progress, Date().timeIntervalSince(lastReport) >= progressInterval {
             lastReport = Date()

@@ -15,13 +15,15 @@ $out.WriteLine('HELLO'); $out.Flush()
 $ticks = 0
 while ($true) {
     Start-Sleep -Milliseconds 300
-    $id = Read-Small $latest
-    if ($id -and $id -ne $last) { $last = $id; $out.WriteLine("CLIP $id"); $out.Flush() }
+    # Notices first: the listener writes "SENDING" before publishing that clip, and
+    # the Mac treats a SENDING as "a newer copy is coming", so the order must hold.
     $note = Read-Small $notice
     if ($note -and $note -ne $lastNotice) {
         $lastNotice = $note
         $out.WriteLine('NOTE ' + ($note -replace '^\S+ ', '')); $out.Flush()   # drop the stamp
     }
+    $id = Read-Small $latest
+    if ($id -and $id -ne $last) { $last = $id; $out.WriteLine("CLIP $id"); $out.Flush() }
     $ticks++
     if ($ticks % 50 -eq 0) { $out.WriteLine('PING'); $out.Flush() }
 }

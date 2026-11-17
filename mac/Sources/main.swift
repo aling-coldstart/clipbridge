@@ -1,33 +1,49 @@
 import AppKit
 
+/// A counter shared with the io queue: each new copy bumps it, and a transfer that
+/// started under an older value is cancelled.
+final class Generation {
+    private let lock = NSLock()
+    private var value = 0
+
+    func next() -> Int {
+        lock.lock(); defer { lock.unlock() }
+        value += 1
+        return value
+    }
+
+    func isCurrent(_ candidate: Int) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return candidate == value
+    }
+}
+
 /// Owns sync state. Everything here runs on the main thread; transfers run on `io`.
 final class ClipSync {
     private let pb = NSPasteboard.general
     private let io = DispatchQueue(label: "clipbridge.io")
     private let watcher = Watcher()
+    private let panel = ProgressPanel()
+    private let outgoing = Generation()
+    private let incoming = Generation()
     private var lastCount: Int
     private var ownCount = -1
     private var online = false
     private var pending: OutgoingClip?
-    private let panel = ProgressPanel()
-    /// Size Windows announced (SENDING) for the next incoming file clip.
-    private var expectedIncoming: Int64?
+    /// A large Windows copy that was announced (SENDING) and whose clip hasn't arrived.
+    private var announced: (bytes: Int64, token: Int)?
 
     init() { lastCount = pb.changeCount }
 
     func start() {
         watcher.onConnected = { DispatchQueue.main.async { self.connected() } }
         watcher.onDisconnected = { DispatchQueue.main.async { self.online = false } }
-        watcher.onClip = { id in
-            DispatchQueue.main.async {
-                let expected = self.expectedIncoming
-                self.expectedIncoming = nil
-                self.io.async { self.receive(id, expectedBytes: expected) }
-            }
-        }
+        watcher.onClip = { id in DispatchQueue.main.async { self.clipArrived(id) } }
         watcher.onNotice = { text in DispatchQueue.main.async { self.remoteNotice(text) } }
         watcher.start()
         Timer.scheduledTimer(withTimeInterval: Config.pollInterval, repeats: true) { _ in self.poll() }
+        Timer.scheduledTimer(withTimeInterval: Config.expiryCheckInterval, repeats: true) { _ in self.pruneAll() }
+        pruneAll()
         log("clipbridge started, host \(Config.host)")
     }
 
@@ -38,6 +54,11 @@ final class ClipSync {
             pending = nil
             send(clip)
         }
+    }
+
+    private func pruneAll() {
+        pruneClips(in: Config.outDir)
+        pruneClips(in: Config.recvDir)
     }
 
     private func poll() {
@@ -52,6 +73,8 @@ final class ClipSync {
             case .tooLarge(let size):
                 tooLarge(size, from: "Mac")
             case .clip(let clip):
+                // The latest copy on either machine wins: drop any download from Windows.
+                _ = incoming.next()
                 if online {
                     send(clip)
                 } else {
@@ -65,22 +88,28 @@ final class ClipSync {
         }
     }
 
+    /// Push to Windows. A newer copy cancels this one, queued or in flight.
     private func send(_ clip: OutgoingClip) {
+        let generation = outgoing.next()
         let large = clip.bytes >= Config.notifyBytes
-        if large {
-            panel.begin("发送 \(clip.fileURLs.count) 个文件到 Windows", detail: "准备中…")
-        }
-        let progress: ((Int64) -> Void)? = large ? { sent in
-            DispatchQueue.main.async { self.panel.update(done: sent, total: clip.bytes) }
-        } : nil
+        let token = large ? panel.begin("发送 \(clip.fileURLs.count) 个文件到 Windows", detail: "准备中…") : nil
+        let progress: ((Int64) -> Void)? = token.map { token in { sent in
+            DispatchQueue.main.async { self.panel.update(token, done: sent, total: clip.bytes) }
+        } }
         io.async {
-            let ok = Remote.push(clip, progress: progress)
-            if ok { log("mac -> win: \(clip.kind.rawValue) (\(clip.id))") }
+            guard self.outgoing.isCurrent(generation) else {
+                log("push \(clip.id) skipped: newer copy")
+                return
+            }
+            let result = Remote.push(clip, progress: progress, isCancelled: { !self.outgoing.isCurrent(generation) })
+            if result.ok { log("mac -> win: \(clip.kind.rawValue) (\(clip.id))") }
             DispatchQueue.main.async {
-                if large {
-                    self.panel.finish(ok ? "已到 Windows，可以粘贴了" : "发送失败，连上后会重试", succeeded: ok)
+                if let token {
+                    let message = result.ok ? "已到 Windows，可以粘贴了"
+                        : result.wasCancelled ? "已取消：复制了新内容" : "发送失败，连上后会重试"
+                    self.panel.finish(token, message, succeeded: result.ok)
                 }
-                if !ok, self.pending == nil { self.pending = clip }
+                if !result.ok, !result.wasCancelled, self.pending == nil { self.pending = clip }
             }
         }
     }
@@ -90,48 +119,69 @@ final class ClipSync {
         notify("\(side) 上复制的文件太大（\(formatBytes(size))，上限 \(formatBytes(Config.maxFileBytes))），未同步")
     }
 
-    /// Windows reported something it could not sync, e.g. "TOOLARGE <bytes>".
+    /// Windows reported something: "TOOLARGE <bytes>" or "SENDING <count> <bytes>".
     func remoteNotice(_ text: String) {
         let parts = text.split(separator: " ")
         if parts.count == 2, parts[0] == "TOOLARGE", let size = Int64(parts[1]) {
             tooLarge(size, from: "Windows")
         } else if parts.count == 3, parts[0] == "SENDING", let count = Int(parts[1]), let size = Int64(parts[2]) {
             log("windows is sending \(count) files, \(size) bytes")
-            expectedIncoming = size
-            panel.begin("从 Windows 接收 \(count) 个文件", detail: "Windows 准备中…（\(formatBytes(size))）")
-            // If the clip never shows up (copy failed on Windows), don't spin forever.
+            // A new Windows copy supersedes any transfer in flight, in either direction.
+            _ = incoming.next()
+            _ = outgoing.next()
+            let token = panel.begin("从 Windows 接收 \(count) 个文件", detail: "Windows 准备中…（\(formatBytes(size))）")
+            announced = (size, token)
+            // If the clip never shows up (copy failed or replaced on Windows), don't spin forever.
             DispatchQueue.main.asyncAfter(deadline: .now() + Config.incomingTimeout) {
-                guard self.expectedIncoming == size else { return }
-                self.expectedIncoming = nil
-                self.panel.finish("Windows 没有发来文件，详见 Windows 日志", succeeded: false)
+                guard let waiting = self.announced, waiting.token == token else { return }
+                self.announced = nil
+                self.panel.finish(token, "Windows 没有发来文件，详见 Windows 日志", succeeded: false)
             }
         } else {
             log("windows notice: \(text)")
         }
     }
 
-    /// Runs on `io`: download, then apply on the main thread. `expectedBytes` is set
-    /// when Windows announced a large transfer; the panel then tracks the download.
-    private func receive(_ id: String, expectedBytes: Int64?) {
-        let progress: ((Int64) -> Void)? = expectedBytes.map { total in { landed in
-            DispatchQueue.main.async { self.panel.update(done: landed, total: total) }
+    private func clipArrived(_ id: String) {
+        _ = outgoing.next()   // the latest copy on either machine wins
+        let generation = incoming.next()
+        let expected = announced
+        announced = nil
+        io.async { self.receive(id, generation: generation, expected: expected) }
+    }
+
+    /// Runs on `io`: download, then apply on the main thread. `expected` is set when
+    /// Windows announced a large transfer; the panel then tracks the download.
+    private func receive(_ id: String, generation: Int, expected: (bytes: Int64, token: Int)?) {
+        let isCancelled = { !self.incoming.isCurrent(generation) }
+        guard !isCancelled() else {
+            log("fetch \(id) skipped: newer copy")
+            return
+        }
+        let progress: ((Int64) -> Void)? = expected.map { expected in { landed in
+            DispatchQueue.main.async { self.panel.update(expected.token, done: landed, total: expected.bytes) }
         } }
-        guard let dir = Remote.fetch(id: id, progress: progress) else {
-            if expectedBytes != nil {
-                DispatchQueue.main.async { self.panel.finish("接收失败，详见日志", succeeded: false) }
+        guard let dir = Remote.fetch(id: id, progress: progress, isCancelled: isCancelled) else {
+            if let expected {
+                let message = isCancelled() ? "已取消：复制了新内容" : "接收失败，详见日志"
+                DispatchQueue.main.async { self.panel.finish(expected.token, message, succeeded: false) }
             }
             return
         }
         DispatchQueue.main.async {
+            guard !isCancelled() else {   // superseded while it finished; don't clobber the newer clip
+                try? FileManager.default.removeItem(at: dir)
+                return
+            }
             do {
                 let kind = try applyClip(at: dir, to: self.pb)
                 self.ownCount = self.pb.changeCount
                 self.lastCount = self.ownCount
                 log("win -> mac: \(kind.rawValue) (\(id))")
-                if expectedBytes != nil { self.panel.finish("已到 Mac，可以粘贴了", succeeded: true) }
+                if let expected { self.panel.finish(expected.token, "已到 Mac，可以粘贴了", succeeded: true) }
             } catch {
                 log("apply \(id) failed: \(error)")
-                if expectedBytes != nil { self.panel.finish("放到剪贴板失败，详见日志", succeeded: false) }
+                if let expected { self.panel.finish(expected.token, "放到剪贴板失败，详见日志", succeeded: false) }
             }
             pruneClips(in: Config.recvDir)
         }

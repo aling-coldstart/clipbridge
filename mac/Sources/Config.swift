@@ -24,6 +24,9 @@ enum Config {
     static let keepClips = 10
     /// File copies at least this big show the progress panel.
     static let notifyBytes: Int64 = 20 * 1024 * 1024
+    /// Received and staged clips are deleted after this long, even the newest one.
+    static let clipMaxAge: TimeInterval = 24 * 60 * 60
+    static let expiryCheckInterval: TimeInterval = 60 * 60
     /// How long to wait for an announced Windows transfer to start arriving.
     static let incomingTimeout: TimeInterval = 300
     static let maxLogBytes: UInt64 = 5 * 1024 * 1024
@@ -66,7 +69,9 @@ func newClipID(prefix: String) -> String {
 
 /// Keep the newest entry of `dir` (the pasteboard may still point at its files), plus
 /// older ones while there are at most `keep` and they total no more than `maxBytes`.
-func pruneClips(in dir: URL, keep: Int = Config.keepClips, maxBytes: Int64 = Config.maxFileBytes) {
+/// Anything older than `maxAge` goes, the newest included.
+func pruneClips(in dir: URL, keep: Int = Config.keepClips, maxBytes: Int64 = Config.maxFileBytes,
+                maxAge: TimeInterval = Config.clipMaxAge) {
     let fm = FileManager.default
     guard let items = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey]) else { return }
     func modified(_ url: URL) -> Date {
@@ -75,7 +80,8 @@ func pruneClips(in dir: URL, keep: Int = Config.keepClips, maxBytes: Int64 = Con
     var total: Int64 = 0
     for (index, item) in items.sorted(by: { modified($0) > modified($1) }).enumerated() {
         total += diskSize(of: item)
-        if index > 0 && (index >= keep || total > maxBytes) {
+        let expired = Date().timeIntervalSince(modified(item)) > maxAge
+        if expired || (index > 0 && (index >= keep || total > maxBytes)) {
             try? fm.removeItem(at: item)
         }
     }
