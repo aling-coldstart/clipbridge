@@ -6,6 +6,7 @@ Two-way clipboard sync (text, images, files) between a Mac and a Windows PC over
 
 - 在 Mac 上按 ⌘C，到 Windows 上按 Ctrl+V，反过来也一样。
 - 文件可以在访达和资源管理器之间直接复制粘贴，单次最大 2 GB（可调整）。超过上限时 Mac 会弹出通知。
+- 传输 20 MB 以上的文件时，Mac 右上角会显示一个进度窗口（两个方向都有），显示百分比、速度和剩余时间，传完显示"可以粘贴了"后自动消失。
 - 通常 1 秒内到达。
 - 连不上 Windows 时几乎不占资源：重试间隔从 2 秒逐步拉长，最长 60 秒一次。
 - 密码管理器复制的密码不会被同步。
