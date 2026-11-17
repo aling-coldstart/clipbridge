@@ -53,7 +53,20 @@ enum Remote {
         try? FileManager.default.removeItem(at: dest)
         let result = scp(["\(Config.host):\(Config.remoteDir)/outbox/\(id)", dest.path])
         guard result.ok else { log("fetch \(id) failed: \(result.output)"); return nil }
+        normalizePermissions(under: dest)
         return dest
+    }
+
+    /// scp carries over modes derived from Windows ACLs (e.g. rw----r-x); give pasted
+    /// files ordinary ones: folders 755, files 644.
+    private static func normalizePermissions(under root: URL) {
+        let fm = FileManager.default
+        try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: root.path)
+        guard let walker = fm.enumerator(at: root, includingPropertiesForKeys: [.isDirectoryKey]) else { return }
+        for case let url as URL in walker {
+            let isDir = (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
+            try? fm.setAttributes([.posixPermissions: isDir ? 0o755 : 0o644], ofItemAtPath: url.path)
+        }
     }
 
     /// Make sure the desktop listener is running (the scheduled task is single-instance).

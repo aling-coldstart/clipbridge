@@ -2,7 +2,8 @@
 #   inbox\ready.txt  <- Mac writes a clip id; we put inbox\<id> on the Windows clipboard.
 #   outbox\<id>      -> when the Windows clipboard changes we export it here and
 #                       update outbox\latest.txt; the Mac fetches it over SSH.
-#   outbox\notice.txt -> "<stamp> TOOLARGE <bytes>" when a copy is over the limit;
+#   outbox\notice.txt -> "<stamp> TOOLARGE <bytes>" when a copy is over the limit, or
+#                       "<stamp> SENDING <count> <bytes>" before exporting a large one;
 #                       watch.ps1 forwards it so the Mac can show a notification.
 # Clip folder layout: kind.txt (text|image|files) + text.txt | image.png | files\*
 $ErrorActionPreference = 'Stop'
@@ -21,6 +22,7 @@ $MaxMB = 0
 if (-not [int]::TryParse("$env:CLIPBRIDGE_MAX_MB", [ref]$MaxMB) -or $MaxMB -le 0) { $MaxMB = 2048 }
 $MaxFileBytes = [int64]$MaxMB * 1MB
 $KeepClips    = 5
+$NotifyBytes  = 20MB   # tell the Mac when a file copy this big starts, so it can say so
 $MaxLogBytes  = 5MB
 $Utf8NoBom    = New-Object System.Text.UTF8Encoding($false)
 
@@ -102,6 +104,7 @@ function Save-ClipboardTo([string]$tmp) {
             Write-Notice "TOOLARGE $size"
             return $null
         }
+        if ($size -ge $NotifyBytes) { Write-Notice "SENDING $($paths.Count) $size" }
         $filesDir = Join-Path $tmp 'files'
         New-Item -ItemType Directory -Path $filesDir | Out-Null
         foreach ($p in $paths) { Copy-Item -LiteralPath $p -Destination $filesDir -Recurse -Force }
