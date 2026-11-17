@@ -14,7 +14,13 @@ enum Config {
     static let pollInterval: TimeInterval = 0.5
     static let minBackoff: TimeInterval = 2
     static let maxBackoff: TimeInterval = 60
-    static let maxFileBytes: Int64 = 200 * 1024 * 1024
+    /// Largest clip we sync, from CLIPBRIDGE_MAX_MB (default 2048). Also caps how much
+    /// older clips may keep on disk; the newest clip is always kept.
+    static let maxFileBytes: Int64 = {
+        let raw = ProcessInfo.processInfo.environment["CLIPBRIDGE_MAX_MB"] ?? ""
+        let mb = Int64(raw).flatMap { $0 > 0 ? $0 : nil } ?? 2048
+        return mb * 1024 * 1024
+    }()
     static let keepClips = 10
     static let maxLogBytes: UInt64 = 5 * 1024 * 1024
 
@@ -54,16 +60,43 @@ func newClipID(prefix: String) -> String {
     "\(prefix)\(Int(Date().timeIntervalSince1970 * 1000))"
 }
 
-/// Keep only the newest `keep` entries of `dir`.
-func pruneClips(in dir: URL, keep: Int = Config.keepClips) {
+/// Keep the newest entry of `dir` (the pasteboard may still point at its files), plus
+/// older ones while there are at most `keep` and they total no more than `maxBytes`.
+func pruneClips(in dir: URL, keep: Int = Config.keepClips, maxBytes: Int64 = Config.maxFileBytes) {
     let fm = FileManager.default
     guard let items = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey]) else { return }
     func modified(_ url: URL) -> Date {
         (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
     }
-    for old in items.sorted(by: { modified($0) > modified($1) }).dropFirst(keep) {
-        try? fm.removeItem(at: old)
+    var total: Int64 = 0
+    for (index, item) in items.sorted(by: { modified($0) > modified($1) }).enumerated() {
+        total += diskSize(of: item)
+        if index > 0 && (index >= keep || total > maxBytes) {
+            try? fm.removeItem(at: item)
+        }
     }
+}
+
+/// Bytes used by a file or folder; symlinks count as themselves, not their targets.
+func diskSize(of url: URL) -> Int64 {
+    let keys: [URLResourceKey] = [.fileSizeKey, .isRegularFileKey]
+    guard let walker = FileManager.default.enumerator(at: url, includingPropertiesForKeys: keys) else { return 0 }
+    var total: Int64 = 0
+    for case let file as URL in walker {
+        guard let values = try? file.resourceValues(forKeys: Set(keys)), values.isRegularFile == true else { continue }
+        total += Int64(values.fileSize ?? 0)
+    }
+    return total
+}
+
+func formatBytes(_ bytes: Int64) -> String {
+    ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+}
+
+/// Show a macOS notification. Text goes in as an argument, never into the script source.
+func notify(_ message: String) {
+    let script = "on run argv\ndisplay notification (item 1 of argv) with title \"ClipBridge\"\nend run"
+    _ = runTool("/usr/bin/osascript", ["-e", script, message])
 }
 
 /// launchd appends to the log forever; start fresh once it passes the size cap.

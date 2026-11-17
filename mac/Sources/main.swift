@@ -16,6 +16,7 @@ final class ClipSync {
         watcher.onConnected = { DispatchQueue.main.async { self.connected() } }
         watcher.onDisconnected = { DispatchQueue.main.async { self.online = false } }
         watcher.onClip = { id in self.io.async { self.receive(id) } }
+        watcher.onNotice = { text in DispatchQueue.main.async { self.remoteNotice(text) } }
         watcher.start()
         Timer.scheduledTimer(withTimeInterval: Config.pollInterval, repeats: true) { _ in self.poll() }
         log("clipbridge started, host \(Config.host)")
@@ -39,6 +40,8 @@ final class ClipSync {
             switch try captureClip(from: pb) {
             case .skipped(let reason):
                 log("skip: \(reason)")
+            case .tooLarge(let size):
+                tooLarge(size, from: "Mac")
             case .clip(let clip):
                 if online {
                     send(clip)
@@ -60,6 +63,21 @@ final class ClipSync {
             } else {
                 DispatchQueue.main.async { if self.pending == nil { self.pending = clip } }
             }
+        }
+    }
+
+    private func tooLarge(_ size: Int64, from side: String) {
+        log("skip: \(side) files \(size) bytes > limit \(Config.maxFileBytes)")
+        notify("\(side) 上复制的文件太大（\(formatBytes(size))，上限 \(formatBytes(Config.maxFileBytes))），未同步")
+    }
+
+    /// Windows reported something it could not sync, e.g. "TOOLARGE <bytes>".
+    func remoteNotice(_ text: String) {
+        let parts = text.split(separator: " ")
+        if parts.count == 2, parts[0] == "TOOLARGE", let size = Int64(parts[1]) {
+            tooLarge(size, from: "Windows")
+        } else {
+            log("windows notice: \(text)")
         }
     }
 
