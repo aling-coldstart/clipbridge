@@ -2,6 +2,8 @@ import AppKit
 
 /// Small floating window in the top-right corner that shows one large file transfer:
 /// a progress bar, bytes done, speed and time left. Main thread only.
+/// `begin` returns a token; updates for an older token are ignored, so a transfer
+/// that was superseded can't overwrite the newer one's display.
 final class ProgressPanel {
     private static let size = NSSize(width: 340, height: 92)
     private static let margin: CGFloat = 16
@@ -14,6 +16,7 @@ final class ProgressPanel {
     /// Where speed is measured from: the first update with bytes moving.
     private var rateOrigin: (time: Date, bytes: Int64)?
     private var hideWork: DispatchWorkItem?
+    private var currentToken = 0
 
     init() {
         panel = NSPanel(contentRect: NSRect(origin: .zero, size: Self.size),
@@ -52,7 +55,9 @@ final class ProgressPanel {
     }
 
     /// Show a new transfer. Without a known size the bar spins until the first update.
-    func begin(_ title: String, detail: String) {
+    @discardableResult
+    func begin(_ title: String, detail: String) -> Int {
+        currentToken += 1
         hideWork?.cancel()
         rateOrigin = nil
         titleLabel.stringValue = title
@@ -61,10 +66,11 @@ final class ProgressPanel {
         bar.startAnimation(nil)
         placeTopRight()
         panel.orderFrontRegardless()
+        return currentToken
     }
 
-    func update(done: Int64, total: Int64) {
-        guard total > 0 else { return }
+    func update(_ token: Int, done: Int64, total: Int64) {
+        guard token == currentToken, total > 0 else { return }
         let clamped = min(max(done, 0), total)
         if bar.isIndeterminate {
             bar.stopAnimation(nil)
@@ -86,7 +92,8 @@ final class ProgressPanel {
     }
 
     /// Show the outcome, then hide after a moment.
-    func finish(_ message: String, succeeded: Bool) {
+    func finish(_ token: Int, _ message: String, succeeded: Bool) {
+        guard token == currentToken else { return }
         if bar.isIndeterminate {
             bar.stopAnimation(nil)
             bar.isIndeterminate = false

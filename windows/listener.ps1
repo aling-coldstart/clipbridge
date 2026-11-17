@@ -22,6 +22,11 @@ $MaxMB = 0
 if (-not [int]::TryParse("$env:CLIPBRIDGE_MAX_MB", [ref]$MaxMB) -or $MaxMB -le 0) { $MaxMB = 2048 }
 $MaxFileBytes = [int64]$MaxMB * 1MB
 $KeepClips    = 5
+$MaxClipAge   = [TimeSpan]::FromHours(24)   # clips older than this go, the newest included
+$ExpiryTicks  = 12000                       # check for expired clips about once an hour
+$RetryTicks   = 10                          # retry a pending Mac clip about every 3 s
+$CopyChunk    = 4MB
+$Superseded   = 'clipboard changed during export'
 $NotifyBytes  = 20MB   # tell the Mac when a file copy this big starts, so it can say so
 $MaxLogBytes  = 5MB
 $Utf8NoBom    = New-Object System.Text.UTF8Encoding($false)
@@ -40,12 +45,19 @@ function Get-DirSize([string]$dir) {
 
 # Keep the newest clip (the clipboard may still point at its files), plus older ones
 # while there are at most $KeepClips and they total no more than $MaxFileBytes.
+# Anything older than $MaxClipAge goes, the newest and abandoned partial folders included.
+# Only called between exports, so no .part folder here is still being written.
 function Remove-OldClips([string]$dir) {
     $total = [int64]0
     $index = 0
+    $cutoff = (Get-Date) - $MaxClipAge
+    foreach ($part in (Get-ChildItem -LiteralPath $dir -Directory | Where-Object { $_.Name -like '*.part' -and $_.LastWriteTime -lt $cutoff })) {
+        Remove-Item -LiteralPath $part.FullName -Recurse -Force -ErrorAction SilentlyContinue
+    }
     foreach ($clip in (Get-ChildItem -LiteralPath $dir -Directory | Where-Object { $_.Name -notlike '*.part' } | Sort-Object LastWriteTime -Descending)) {
         $total += Get-DirSize $clip.FullName
-        if ($index -gt 0 -and ($index -ge $KeepClips -or $total -gt $MaxFileBytes)) {
+        $expired = $clip.LastWriteTime -lt $cutoff
+        if ($expired -or ($index -gt 0 -and ($index -ge $KeepClips -or $total -gt $MaxFileBytes))) {
             Remove-Item -LiteralPath $clip.FullName -Recurse -Force -ErrorAction SilentlyContinue
         }
         $index++
@@ -58,24 +70,32 @@ function Write-Notice([string]$text) {
     Move-Item -LiteralPath $tmp -Destination $NoticeFile -Force
 }
 
+# Retries for about 2 s; while the screen is locked the clipboard can't be written
+# at all, so the main loop keeps the clip pending and tries again later.
+function Set-ClipboardData([Windows.Forms.DataObject]$data) {
+    [Windows.Forms.Clipboard]::SetDataObject($data, $true, 20, 100)
+}
+
 function Import-RemoteClip([string]$id) {
     if ($id -notmatch '^m\d+$') { throw "rejected clip id '$id'" }
     $clipDir = Join-Path $Inbox $id
     $kind = ([IO.File]::ReadAllText((Join-Path $clipDir 'kind.txt'))).Trim()
+    $data = New-Object Windows.Forms.DataObject
     switch ($kind) {
         'text' {
-            $text = [IO.File]::ReadAllText((Join-Path $clipDir 'text.txt'), $Utf8NoBom)
-            [Windows.Forms.Clipboard]::SetText($text)
+            $data.SetText([IO.File]::ReadAllText((Join-Path $clipDir 'text.txt'), $Utf8NoBom))
+            Set-ClipboardData $data
         }
         'image' {
             $img = [Drawing.Image]::FromFile((Join-Path $clipDir 'image.png'))
-            try { [Windows.Forms.Clipboard]::SetImage($img) } finally { $img.Dispose() }
+            try { $data.SetImage($img); Set-ClipboardData $data } finally { $img.Dispose() }
         }
         'files' {
             $list = New-Object System.Collections.Specialized.StringCollection
             Get-ChildItem -LiteralPath (Join-Path $clipDir 'files') | ForEach-Object { [void]$list.Add($_.FullName) }
             if ($list.Count -eq 0) { throw 'files clip is empty' }
-            [Windows.Forms.Clipboard]::SetFileDropList($list)
+            $data.SetFileDropList($list)
+            Set-ClipboardData $data
         }
         default { throw "unknown kind '$kind'" }
     }
@@ -94,6 +114,46 @@ function Get-PathsSize([string[]]$paths) {
     return $total
 }
 
+# Copy one file in chunks, giving up as soon as the clipboard changes again: a newer
+# copy makes this one pointless, and large files take a while.
+function Copy-FileChecked([string]$src, [string]$dst) {
+    $in = [IO.File]::OpenRead($src)
+    try {
+        $out = [IO.File]::Create($dst)
+        try {
+            $buf = New-Object byte[] $CopyChunk
+            while (($n = $in.Read($buf, 0, $buf.Length)) -gt 0) {
+                if ((Get-ClipSeq) -ne $script:lastSeq) { throw $Superseded }
+                $out.Write($buf, 0, $n)
+            }
+        } finally { $out.Dispose() }
+    } finally { $in.Dispose() }
+    [IO.File]::SetLastWriteTimeUtc($dst, [IO.File]::GetLastWriteTimeUtc($src))
+}
+
+# Copy a file or a whole folder (keeping its name) into $destDir.
+function Copy-ClipPath([string]$path, [string]$destDir) {
+    $name = Split-Path -Leaf $path
+    if (-not (Test-Path -LiteralPath $path -PathType Container)) {
+        Copy-FileChecked $path (Join-Path $destDir $name)
+        return
+    }
+    $root = Join-Path $destDir $name
+    New-Item -ItemType Directory -Force -Path $root | Out-Null
+    # .NET returns entries with exactly the prefix we pass in (Get-ChildItem may expand
+    # 8.3 short names, which would throw off the relative paths).
+    $base = $path.TrimEnd('\')
+    foreach ($entry in [IO.Directory]::EnumerateFileSystemEntries($base, '*', [IO.SearchOption]::AllDirectories)) {
+        $target = Join-Path $root $entry.Substring($base.Length + 1)
+        if ([IO.Directory]::Exists($entry)) {
+            New-Item -ItemType Directory -Force -Path $target | Out-Null
+        } else {
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target) | Out-Null
+            Copy-FileChecked $entry $target
+        }
+    }
+}
+
 # Returns the clip kind written into $tmp, or $null when nothing exportable.
 function Save-ClipboardTo([string]$tmp) {
     if ([Windows.Forms.Clipboard]::ContainsFileDropList()) {
@@ -107,7 +167,7 @@ function Save-ClipboardTo([string]$tmp) {
         if ($size -ge $NotifyBytes) { Write-Notice "SENDING $($paths.Count) $size" }
         $filesDir = Join-Path $tmp 'files'
         New-Item -ItemType Directory -Path $filesDir | Out-Null
-        foreach ($p in $paths) { Copy-Item -LiteralPath $p -Destination $filesDir -Recurse -Force }
+        foreach ($p in $paths) { Copy-ClipPath $p $filesDir }
         return 'files'
     }
     if ([Windows.Forms.Clipboard]::ContainsText()) {
@@ -141,6 +201,10 @@ function Export-WinClip {
         Write-Log "win -> mac: $kind ($id)"
     } catch {
         Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
+        if ($_.Exception.Message -eq $Superseded) {
+            Write-Log "cancel: $Superseded ($id)"   # the main loop exports the new one next
+            return
+        }
         throw
     }
 }
@@ -157,21 +221,50 @@ if ((Test-Path $LogFile) -and (Get-Item $LogFile).Length -gt $MaxLogBytes) {
 }
 Write-Log "listener started (limit $MaxMB MB)"
 $lastSeq = Get-ClipSeq
+$ticks = 0
+$pendingId = $null       # Mac clip not yet on the clipboard (e.g. screen locked); newest wins
+$pendingLogged = $false
+$retryIn = 0             # loop passes until the next attempt at the pending clip
+foreach ($d in $Inbox, $Outbox) { Remove-OldClips $d }
 
 while ($true) {
     try {
         if (Test-Path -LiteralPath $ReadyFile) {
-            $id = ([IO.File]::ReadAllText($ReadyFile)).Trim()
+            $pendingId = ([IO.File]::ReadAllText($ReadyFile)).Trim()
             Remove-Item -LiteralPath $ReadyFile -Force
-            Import-RemoteClip $id
-            $lastSeq = Get-ClipSeq          # our own change: don't echo back to the Mac
-            Remove-OldClips $Inbox
+            $pendingLogged = $false
+            $retryIn = 0                     # try right away
+        }
+        if ($pendingId -and $retryIn -gt 0) {
+            $retryIn--
+        } elseif ($pendingId) {
+            try {
+                Import-RemoteClip $pendingId
+                $pendingId = $null
+                $lastSeq = Get-ClipSeq          # our own change: don't echo back to the Mac
+                Remove-OldClips $Inbox
+            } catch {
+                if ($pendingId -notmatch '^m\d+$') { $pendingId = $null; throw }
+                $retryIn = $RetryTicks
+                if (-not $pendingLogged) {
+                    Write-Log "waiting: clipboard unavailable (screen locked?), will retry $pendingId - $($_.Exception.Message)"
+                    $pendingLogged = $true
+                }
+            }
         }
         if ((Get-ClipSeq) -ne $lastSeq) {
+            if ($pendingId) {                    # a newer copy on Windows wins
+                Write-Log "drop pending $pendingId`: newer Windows copy"
+                $pendingId = $null
+            }
             Start-Sleep -Milliseconds $SettleMs   # let the source app finish writing all formats
             $lastSeq = Get-ClipSeq
             Export-WinClip
             Remove-OldClips $Outbox
+        }
+        $ticks++
+        if ($ticks % $ExpiryTicks -eq 0) {
+            foreach ($d in $Inbox, $Outbox) { Remove-OldClips $d }
         }
     } catch {
         Write-Log ('error: ' + $_.Exception.Message)
