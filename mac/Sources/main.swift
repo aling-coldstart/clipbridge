@@ -9,13 +9,22 @@ final class ClipSync {
     private var ownCount = -1
     private var online = false
     private var pending: OutgoingClip?
+    private let panel = ProgressPanel()
+    /// Size Windows announced (SENDING) for the next incoming file clip.
+    private var expectedIncoming: Int64?
 
     init() { lastCount = pb.changeCount }
 
     func start() {
         watcher.onConnected = { DispatchQueue.main.async { self.connected() } }
         watcher.onDisconnected = { DispatchQueue.main.async { self.online = false } }
-        watcher.onClip = { id in self.io.async { self.receive(id) } }
+        watcher.onClip = { id in
+            DispatchQueue.main.async {
+                let expected = self.expectedIncoming
+                self.expectedIncoming = nil
+                self.io.async { self.receive(id, expectedBytes: expected) }
+            }
+        }
         watcher.onNotice = { text in DispatchQueue.main.async { self.remoteNotice(text) } }
         watcher.start()
         Timer.scheduledTimer(withTimeInterval: Config.pollInterval, repeats: true) { _ in self.poll() }
@@ -58,14 +67,20 @@ final class ClipSync {
 
     private func send(_ clip: OutgoingClip) {
         let large = clip.bytes >= Config.notifyBytes
-        let what = "\(clip.fileURLs.count) 个文件（\(formatBytes(clip.bytes))）"
-        if large { notify("正在发送 \(what) 到 Windows…") }
+        if large {
+            panel.begin("发送 \(clip.fileURLs.count) 个文件到 Windows", detail: "准备中…")
+        }
+        let progress: ((Int64) -> Void)? = large ? { sent in
+            DispatchQueue.main.async { self.panel.update(done: sent, total: clip.bytes) }
+        } : nil
         io.async {
-            if Remote.push(clip) {
-                log("mac -> win: \(clip.kind.rawValue) (\(clip.id))")
-                if large { notify("\(what) 已到 Windows，可以粘贴了") }
-            } else {
-                DispatchQueue.main.async { if self.pending == nil { self.pending = clip } }
+            let ok = Remote.push(clip, progress: progress)
+            if ok { log("mac -> win: \(clip.kind.rawValue) (\(clip.id))") }
+            DispatchQueue.main.async {
+                if large {
+                    self.panel.finish(ok ? "已到 Windows，可以粘贴了" : "发送失败，连上后会重试", succeeded: ok)
+                }
+                if !ok, self.pending == nil { self.pending = clip }
             }
         }
     }
@@ -82,25 +97,41 @@ final class ClipSync {
             tooLarge(size, from: "Windows")
         } else if parts.count == 3, parts[0] == "SENDING", let count = Int(parts[1]), let size = Int64(parts[2]) {
             log("windows is sending \(count) files, \(size) bytes")
-            notify("正在从 Windows 接收 \(count) 个文件（\(formatBytes(size))）…")
+            expectedIncoming = size
+            panel.begin("从 Windows 接收 \(count) 个文件", detail: "Windows 准备中…（\(formatBytes(size))）")
+            // If the clip never shows up (copy failed on Windows), don't spin forever.
+            DispatchQueue.main.asyncAfter(deadline: .now() + Config.incomingTimeout) {
+                guard self.expectedIncoming == size else { return }
+                self.expectedIncoming = nil
+                self.panel.finish("Windows 没有发来文件，详见 Windows 日志", succeeded: false)
+            }
         } else {
             log("windows notice: \(text)")
         }
     }
 
-    /// Runs on `io`: download, then apply on the main thread.
-    private func receive(_ id: String) {
-        guard let dir = Remote.fetch(id: id) else { return }
+    /// Runs on `io`: download, then apply on the main thread. `expectedBytes` is set
+    /// when Windows announced a large transfer; the panel then tracks the download.
+    private func receive(_ id: String, expectedBytes: Int64?) {
+        let progress: ((Int64) -> Void)? = expectedBytes.map { total in { landed in
+            DispatchQueue.main.async { self.panel.update(done: landed, total: total) }
+        } }
+        guard let dir = Remote.fetch(id: id, progress: progress) else {
+            if expectedBytes != nil {
+                DispatchQueue.main.async { self.panel.finish("接收失败，详见日志", succeeded: false) }
+            }
+            return
+        }
         DispatchQueue.main.async {
             do {
                 let kind = try applyClip(at: dir, to: self.pb)
                 self.ownCount = self.pb.changeCount
                 self.lastCount = self.ownCount
                 log("win -> mac: \(kind.rawValue) (\(id))")
-                let bytes = kind == .files ? diskSize(of: dir) : 0
-                if bytes >= Config.notifyBytes { notify("Windows 的文件（\(formatBytes(bytes))）已到 Mac，可以粘贴了") }
+                if expectedBytes != nil { self.panel.finish("已到 Mac，可以粘贴了", succeeded: true) }
             } catch {
                 log("apply \(id) failed: \(error)")
+                if expectedBytes != nil { self.panel.finish("放到剪贴板失败，详见日志", succeeded: false) }
             }
             pruneClips(in: Config.recvDir)
         }
@@ -120,6 +151,10 @@ for name in (try? FileManager.default.contentsOfDirectory(atPath: sshDir.path)) 
     let ownerAlive = parts.count >= 3 && Int32(parts[1]).map { kill($0, 0) == 0 } == true
     if !ownerAlive { try? FileManager.default.removeItem(at: sshDir.appendingPathComponent(name)) }
 }
+signal(SIGPIPE, SIG_IGN)   // a dead ssh must fail the write, not kill the agent
+// An accessory app: no Dock icon or menu bar, but it may show the progress panel.
+let app = NSApplication.shared
+app.setActivationPolicy(.accessory)
 let sync = ClipSync()
 sync.start()
-RunLoop.main.run()
+app.run()

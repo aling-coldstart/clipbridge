@@ -22,8 +22,10 @@ enum Config {
         return mb * 1024 * 1024
     }()
     static let keepClips = 10
-    /// File copies at least this big get "transferring" / "ready to paste" notifications.
+    /// File copies at least this big show the progress panel.
     static let notifyBytes: Int64 = 20 * 1024 * 1024
+    /// How long to wait for an announced Windows transfer to start arriving.
+    static let incomingTimeout: TimeInterval = 300
     static let maxLogBytes: UInt64 = 5 * 1024 * 1024
 
     /// Folder name under %USERPROFILE% on Windows, and the scheduled task that runs the listener.

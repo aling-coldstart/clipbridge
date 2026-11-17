@@ -4,7 +4,8 @@ import Foundation
 enum Remote {
     /// Upload a Mac clip into %USERPROFILE%\\<remoteDir>\\inbox\\<id> and signal the listener,
     /// in one SSH round trip: `tar -c | ssh "mkdir && tar -x && signal"`.
-    static func push(_ clip: OutgoingClip) -> Bool {
+    /// `progress` gets the bytes sent so far (tar stream, so slightly over `clip.bytes`).
+    static func push(_ clip: OutgoingClip, progress: ((Int64) -> Void)? = nil) -> Bool {
         do {
             try stageFileLinks(for: clip)
         } catch {
@@ -18,7 +19,8 @@ enum Remote {
         let result = runPipeline(
             producer: ("/usr/bin/tar", ["-c", "-h", "-f", "-", "-C", clip.dir.path, "."]),
             consumer: ("/usr/bin/ssh", Config.sshOptions + [Config.host, remote]),
-            environment: ["COPYFILE_DISABLE": "1"])
+            environment: ["COPYFILE_DISABLE": "1"],
+            progress: progress)
         if !result.ok { log("push \(id) failed (\(result.status)): \(result.output)") }
         return result.ok
     }
@@ -43,15 +45,17 @@ enum Remote {
         }
     }
 
-    /// Download outbox\<id> into recv/<id>. Returns the local folder.
-    static func fetch(id: String) -> URL? {
+    /// Download outbox\<id> into recv/<id>. Returns the local folder. `progress` gets
+    /// the bytes that have landed so far, while the download runs.
+    static func fetch(id: String, progress: ((Int64) -> Void)? = nil) -> URL? {
         guard id.range(of: #"^w\d+$"#, options: .regularExpression) != nil else {
             log("fetch: rejected id '\(id)'")
             return nil
         }
         let dest = Config.recvDir.appendingPathComponent(id)
         try? FileManager.default.removeItem(at: dest)
-        let result = scp(["\(Config.host):\(Config.remoteDir)/outbox/\(id)", dest.path])
+        let report = progress.map { report in { report(diskSize(of: dest)) } }
+        let result = scp(["\(Config.host):\(Config.remoteDir)/outbox/\(id)", dest.path], whileRunning: report)
         guard result.ok else { log("fetch \(id) failed: \(result.output)"); return nil }
         normalizePermissions(under: dest)
         return dest
