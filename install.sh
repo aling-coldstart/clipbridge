@@ -4,6 +4,8 @@
 #   ./install.sh user@windows-host
 #   bash <(curl -fsSL https://raw.githubusercontent.com/encorechow/clipbridge/main/install.sh) user@windows-host
 #
+# Optional: CLIPBRIDGE_MAX_MB=4096 ./install.sh ...   (largest clip to sync, default 2048)
+#
 # Requirements: macOS with Xcode Command Line Tools; Windows 10 1803+/11 with the
 # OpenSSH Server feature enabled and the target user logged in at the desktop.
 set -euo pipefail
@@ -16,6 +18,7 @@ PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 LOG="$HOME/Library/Logs/clipbridge.log"
 REMOTE_DIR="clipbridge"
 SSH_OPTS=(-o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new)
+MAX_MB="${CLIPBRIDGE_MAX_MB:-}"
 
 info() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m!! \033[0m %s\n' "$*" >&2; }
@@ -55,6 +58,7 @@ read_host() {
     read -rp "Windows SSH target (user@host or ~/.ssh/config alias): " HOST </dev/tty
   fi
   [[ $HOST =~ ^[A-Za-z0-9._@%+\\-]+$ ]] || die "Invalid SSH target '$HOST'"
+  [[ -z $MAX_MB || $MAX_MB =~ ^[1-9][0-9]{0,6}$ ]] || die "CLIPBRIDGE_MAX_MB must be a whole number of MB"
 }
 
 check_mac() {
@@ -156,6 +160,14 @@ deploy_windows() {
   COPYFILE_DISABLE=1 tar -c -f - -C "$SRC/windows" . \
     | ssh "${SSH_OPTS[@]}" -o BatchMode=yes "$HOST" "(if not exist $REMOTE_DIR mkdir $REMOTE_DIR) && tar -xf - -C $REMOTE_DIR" \
     || die "Copying scripts to Windows failed."
+  # The listener reads this user environment variable at start; keep it in step with the Mac.
+  if [[ -n $MAX_MB ]]; then
+    ssh "${SSH_OPTS[@]}" -o BatchMode=yes "$HOST" "setx CLIPBRIDGE_MAX_MB $MAX_MB >nul" \
+      || die "Setting CLIPBRIDGE_MAX_MB on Windows failed."
+  else
+    ssh "${SSH_OPTS[@]}" -o BatchMode=yes "$HOST" "reg delete HKCU\\Environment /v CLIPBRIDGE_MAX_MB /f >nul 2>&1 & exit /b 0" \
+      || true
+  fi
   ssh "${SSH_OPTS[@]}" -o BatchMode=yes "$HOST" \
     "powershell -NoProfile -ExecutionPolicy Bypass -File $REMOTE_DIR\\install-windows.ps1" \
     || die "Registering the Windows scheduled task failed."
@@ -172,7 +184,10 @@ install_agent() {
   <key>Label</key><string>$LABEL</string>
   <key>ProgramArguments</key><array><string>$BIN</string></array>
   <key>EnvironmentVariables</key>
-  <dict><key>CLIPBRIDGE_HOST</key><string>$HOST</string></dict>
+  <dict>
+    <key>CLIPBRIDGE_HOST</key><string>$HOST</string>${MAX_MB:+
+    <key>CLIPBRIDGE_MAX_MB</key><string>$MAX_MB</string>}
+  </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>10</integer>

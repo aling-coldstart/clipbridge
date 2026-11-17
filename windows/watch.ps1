@@ -1,18 +1,27 @@
 # Run by the Mac over SSH. Prints "HELLO" once, then "CLIP <id>" whenever the
-# desktop listener publishes a new outbox clip, and "PING" every ~15 s.
-$latest = Join-Path $env:USERPROFILE 'clipbridge\outbox\latest.txt'
-function Read-Latest {
-    try { if (Test-Path -LiteralPath $latest) { return ([IO.File]::ReadAllText($latest)).Trim() } } catch { }
+# desktop listener publishes a new outbox clip, "NOTE <text>" when it reports a
+# problem (outbox\notice.txt), and "PING" every ~15 s.
+$outbox = Join-Path $env:USERPROFILE 'clipbridge\outbox'
+$latest = Join-Path $outbox 'latest.txt'
+$notice = Join-Path $outbox 'notice.txt'
+function Read-Small([string]$path) {
+    try { if (Test-Path -LiteralPath $path) { return ([IO.File]::ReadAllText($path)).Trim() } } catch { }
     return ''
 }
 $out = [Console]::Out
-$last = Read-Latest
+$last = Read-Small $latest
+$lastNotice = Read-Small $notice
 $out.WriteLine('HELLO'); $out.Flush()
 $ticks = 0
 while ($true) {
     Start-Sleep -Milliseconds 300
-    $id = Read-Latest
+    $id = Read-Small $latest
     if ($id -and $id -ne $last) { $last = $id; $out.WriteLine("CLIP $id"); $out.Flush() }
+    $note = Read-Small $notice
+    if ($note -and $note -ne $lastNotice) {
+        $lastNotice = $note
+        $out.WriteLine('NOTE ' + ($note -replace '^\S+ ', '')); $out.Flush()   # drop the stamp
+    }
     $ticks++
     if ($ticks % 50 -eq 0) { $out.WriteLine('PING'); $out.Flush() }
 }

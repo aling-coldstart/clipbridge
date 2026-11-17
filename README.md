@@ -5,7 +5,7 @@
 Two-way clipboard sync (text, images, files) between a Mac and a Windows PC over SSH. No cloud and no extra open ports: the Mac connects to the Windows OpenSSH server, and that's it.
 
 - 在 Mac 上按 ⌘C，到 Windows 上按 Ctrl+V，反过来也一样。
-- 文件可以在访达和资源管理器之间直接复制粘贴，单次最大 200 MB。
+- 文件可以在访达和资源管理器之间直接复制粘贴，单次最大 2 GB（可调整）。超过上限时 Mac 会弹出通知。
 - 通常 1 秒内到达。
 - 连不上 Windows 时几乎不占资源：重试间隔从 2 秒逐步拉长，最长 60 秒一次。
 - 密码管理器复制的密码不会被同步。
@@ -35,6 +35,16 @@ bash <(curl -fsSL https://raw.githubusercontent.com/encorechow/clipbridge/main/i
 4. 把接收脚本部署到 Windows 的 `%USERPROFILE%\clipbridge`，并注册一个登录时运行的计划任务。
 
 重复运行安装脚本可以升级程序，或者改连另一台 Windows。
+
+### 调整文件大小上限
+
+默认单次最多同步 2 GB。想改的话，安装时设置 `CLIPBRIDGE_MAX_MB`（单位 MB），脚本会同时配置 Mac 和 Windows 两端：
+
+```bash
+CLIPBRIDGE_MAX_MB=4096 ./install.sh user@windows-ip
+```
+
+不设置就恢复默认的 2 GB。注意 ClipBridge 是"一复制就传"，复制大文件时即使不粘贴也会传输一次。
 
 ## 卸载
 
@@ -77,7 +87,7 @@ powershell -File %USERPROFILE%\clipbridge\uninstall-windows.ps1
 | 日志 | `~/Library/Logs/clipbridge.log` | `%USERPROFILE%\clipbridge\listener.log` |
 | 临时数据 | `~/.local/share/clipbridge/` | `%USERPROFILE%\clipbridge\inbox`、`outbox` |
 
-两端的日志超过 5 MB 时都会自动清空或轮转。
+两端的日志超过 5 MB 时都会自动清空或轮转。临时数据只保留最近几份，并且旧的那几份加起来不超过大小上限；最近一份始终保留，因为剪贴板里的文件可能还指向它。
 
 ## 故障排查
 
@@ -85,7 +95,8 @@ powershell -File %USERPROFILE%\clipbridge\uninstall-windows.ps1
 - **只有 Windows → Mac 不工作**：在 Windows 上运行 `powershell -File %USERPROFILE%\clipbridge\restart.ps1` 重启接收程序。
 - **SSH 密钥带密码短语**：后台服务没法替你输入密码短语。可以把它存进钥匙串（`ssh-add --apple-use-keychain`），或者换用不带密码短语的密钥。
 - **Windows 账号是管理员但免密登录失败**：确认公钥在 `C:\ProgramData\ssh\administrators_authorized_keys` 里，并且该文件只有 Administrators 和 SYSTEM 两个账户有权限。
-- **粘贴出来的是旧内容**：复制后稍等 1 秒再粘贴。大文件传输需要更长时间，进度可以在日志里看到。
+- **粘贴出来的是旧内容**：复制后稍等 1 秒再粘贴。大文件需要更长时间，局域网里 1 GB 大约 10 到 20 秒，日志里会记录传输完成的时间。
+- **文件粘贴不过来**：看 Mac 有没有弹出"文件太大"的通知，或者在日志里搜 `skip:`。需要的话可以调高上限。
 
 ## 安全
 

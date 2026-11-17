@@ -16,6 +16,7 @@ struct OutgoingClip {
 enum CaptureResult {
     case clip(OutgoingClip)
     case skipped(String)
+    case tooLarge(Int64)
 }
 
 private let concealedTypes: Set<NSPasteboard.PasteboardType> = [
@@ -60,7 +61,7 @@ func captureClip(from pb: NSPasteboard) throws -> CaptureResult {
     try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     if !fileURLs.isEmpty {
         let size = totalSize(of: fileURLs)
-        if size > Config.maxFileBytes { try? FileManager.default.removeItem(at: dir); return .skipped("files \(size) bytes > limit") }
+        if size > Config.maxFileBytes { try? FileManager.default.removeItem(at: dir); return .tooLarge(size) }
         kind = .files
     } else if let text = pb.string(forType: .string), !text.isEmpty {
         try text.write(to: dir.appendingPathComponent("text.txt"), atomically: true, encoding: .utf8)

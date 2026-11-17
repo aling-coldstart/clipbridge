@@ -1,12 +1,13 @@
 import Foundation
 
-/// Keeps one long-lived SSH session running watch.ps1 on Windows. That session is
+/// Keeps one long-lived SSH session running watch.ps1 on Windows (HELLO, CLIP <id>, NOTE <text>, PING). That session is
 /// also the ControlMaster other ssh/scp calls multiplex over. Reconnects with
 /// exponential backoff, so an unreachable host costs one attempt per minute at most.
 final class Watcher {
     var onConnected: () -> Void = {}
     var onDisconnected: () -> Void = {}
     var onClip: (String) -> Void = { _ in }
+    var onNotice: (String) -> Void = { _ in }
 
     func start() {
         Thread.detachNewThread { [weak self] in self?.loop() }
@@ -57,6 +58,8 @@ final class Watcher {
                     onConnected()
                 } else if line.hasPrefix("CLIP ") {
                     onClip(String(line.dropFirst(5)))
+                } else if line.hasPrefix("NOTE ") {
+                    onNotice(String(line.dropFirst(5)))
                 }
             }
         }

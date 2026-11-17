@@ -2,6 +2,8 @@
 #   inbox\ready.txt  <- Mac writes a clip id; we put inbox\<id> on the Windows clipboard.
 #   outbox\<id>      -> when the Windows clipboard changes we export it here and
 #                       update outbox\latest.txt; the Mac fetches it over SSH.
+#   outbox\notice.txt -> "<stamp> TOOLARGE <bytes>" when a copy is over the limit;
+#                       watch.ps1 forwards it so the Mac can show a notification.
 # Clip folder layout: kind.txt (text|image|files) + text.txt | image.png | files\*
 $ErrorActionPreference = 'Stop'
 $Root         = Join-Path $env:USERPROFILE 'clipbridge'
@@ -9,10 +11,15 @@ $Inbox        = Join-Path $Root 'inbox'
 $Outbox       = Join-Path $Root 'outbox'
 $ReadyFile    = Join-Path $Inbox 'ready.txt'
 $LatestFile   = Join-Path $Outbox 'latest.txt'
+$NoticeFile   = Join-Path $Outbox 'notice.txt'
 $LogFile      = Join-Path $Root 'listener.log'
 $PollMs       = 300
 $SettleMs     = 150
-$MaxFileBytes = 200MB
+# Largest clip we sync; also caps how much older clips may keep on disk. Override with
+# a CLIPBRIDGE_MAX_MB user environment variable (setx), then run restart.ps1.
+$MaxMB = 0
+if (-not [int]::TryParse("$env:CLIPBRIDGE_MAX_MB", [ref]$MaxMB) -or $MaxMB -le 0) { $MaxMB = 2048 }
+$MaxFileBytes = [int64]$MaxMB * 1MB
 $KeepClips    = 5
 $MaxLogBytes  = 5MB
 $Utf8NoBom    = New-Object System.Text.UTF8Encoding($false)
@@ -24,11 +31,29 @@ function Write-Log([string]$msg) {
 
 function Get-ClipSeq { [ClipBridge.Native]::GetClipboardSequenceNumber() }
 
+function Get-DirSize([string]$dir) {
+    $sum = (Get-ChildItem -LiteralPath $dir -Recurse -File -Force -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum
+    if ($sum) { return [int64]$sum } else { return [int64]0 }
+}
+
+# Keep the newest clip (the clipboard may still point at its files), plus older ones
+# while there are at most $KeepClips and they total no more than $MaxFileBytes.
 function Remove-OldClips([string]$dir) {
-    Get-ChildItem -Path $dir -Directory |
-        Sort-Object LastWriteTime -Descending |
-        Select-Object -Skip $KeepClips |
-        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+    $total = [int64]0
+    $index = 0
+    foreach ($clip in (Get-ChildItem -LiteralPath $dir -Directory | Where-Object { $_.Name -notlike '*.part' } | Sort-Object LastWriteTime -Descending)) {
+        $total += Get-DirSize $clip.FullName
+        if ($index -gt 0 -and ($index -ge $KeepClips -or $total -gt $MaxFileBytes)) {
+            Remove-Item -LiteralPath $clip.FullName -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        $index++
+    }
+}
+
+function Write-Notice([string]$text) {
+    $tmp = $NoticeFile + '.tmp'
+    [IO.File]::WriteAllText($tmp, ('{0:yyyyMMddHHmmssfff} {1}' -f (Get-Date), $text), $Utf8NoBom)
+    Move-Item -LiteralPath $tmp -Destination $NoticeFile -Force
 }
 
 function Import-RemoteClip([string]$id) {
@@ -72,7 +97,11 @@ function Save-ClipboardTo([string]$tmp) {
     if ([Windows.Forms.Clipboard]::ContainsFileDropList()) {
         $paths = @([Windows.Forms.Clipboard]::GetFileDropList())
         $size = Get-PathsSize $paths
-        if ($size -gt $MaxFileBytes) { Write-Log "skip: files total $size bytes > limit"; return $null }
+        if ($size -gt $MaxFileBytes) {
+            Write-Log "skip: files total $size bytes > limit $MaxFileBytes"
+            Write-Notice "TOOLARGE $size"
+            return $null
+        }
         $filesDir = Join-Path $tmp 'files'
         New-Item -ItemType Directory -Path $filesDir | Out-Null
         foreach ($p in $paths) { Copy-Item -LiteralPath $p -Destination $filesDir -Recurse -Force }
@@ -119,7 +148,7 @@ Add-Type -Namespace ClipBridge -Name Native -MemberDefinition '[DllImport("user3
 if ((Test-Path $LogFile) -and (Get-Item $LogFile).Length -gt $MaxLogBytes) {
     Move-Item -LiteralPath $LogFile -Destination ($LogFile + '.old') -Force
 }
-Write-Log 'listener started'
+Write-Log "listener started (limit $MaxMB MB)"
 $lastSeq = Get-ClipSeq
 
 while ($true) {
