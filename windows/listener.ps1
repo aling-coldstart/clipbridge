@@ -119,6 +119,10 @@ function Save-ClipboardTo([string]$tmp) {
         try { $img.Save((Join-Path $tmp 'image.png'), [Drawing.Imaging.ImageFormat]::Png) } finally { $img.Dispose() }
         return 'image'
     }
+    # e.g. files copied out of a zip, a phone, or an app attachment (virtual files, no paths)
+    $data = [Windows.Forms.Clipboard]::GetDataObject()
+    $formats = if ($data) { ($data.GetFormats() | Select-Object -First 12) -join ', ' } else { 'none' }
+    Write-Log "skip: no text, image or file paths on clipboard (formats: $formats)"
     return $null
 }
 
