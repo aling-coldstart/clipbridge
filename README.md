@@ -22,7 +22,7 @@ Two-way clipboard sync (text, images, files) between a Mac and a Windows PC over
 然后在 **Mac** 的终端里运行（把 `user@windows-ip` 换成你的 Windows 用户名和 IP）：
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/encorechow/clipbridge/main/install.sh) user@windows-ip
+bash <(curl -fsSL https://raw.githubusercontent.com/aling-coldstart/clipbridge/main/install.sh) user@windows-ip
 ```
 
 如果已经 clone 了这个仓库，也可以直接运行：
@@ -52,7 +52,7 @@ CLIPBRIDGE_MAX_MB=4096 ./install.sh user@windows-ip
 ## 卸载
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/encorechow/clipbridge/main/uninstall.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/aling-coldstart/clipbridge/main/uninstall.sh)
 ```
 
 这会同时清理 Mac 和 Windows 两端。如果当时 Windows 连不上，可以之后在 Windows 上运行：

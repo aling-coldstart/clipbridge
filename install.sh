@@ -2,7 +2,7 @@
 # ClipBridge installer — run on the Mac. Sets up both machines over SSH.
 #
 #   ./install.sh user@windows-host
-#   bash <(curl -fsSL https://raw.githubusercontent.com/encorechow/clipbridge/main/install.sh) user@windows-host
+#   bash <(curl -fsSL https://raw.githubusercontent.com/aling-coldstart/clipbridge/main/install.sh) user@windows-host
 #
 # Optional: CLIPBRIDGE_MAX_MB=4096 ./install.sh ...   (largest clip to sync, default 2048)
 #
@@ -10,7 +10,7 @@
 # OpenSSH Server feature enabled and the target user logged in at the desktop.
 set -euo pipefail
 
-REPO="encorechow/clipbridge"
+REPO="aling-coldstart/clipbridge"
 BRANCH="${CLIPBRIDGE_BRANCH:-main}"
 LABEL="com.clipbridge.agent"
 BIN="$HOME/.local/bin/clipbridge"
