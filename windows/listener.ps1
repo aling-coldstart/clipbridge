@@ -154,6 +154,52 @@ function Copy-ClipPath([string]$path, [string]$destDir) {
     }
 }
 
+function Get-Sha256([byte[]]$bytes) {
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { return [BitConverter]::ToString($sha.ComputeHash($bytes)) } finally { $sha.Dispose() }
+}
+
+# One file-drop entry as "path|size|newest write time"; folders are summed over their files.
+function Get-PathFingerprint([string]$path) {
+    if (-not (Test-Path -LiteralPath $path -PathType Container)) {
+        $item = Get-Item -LiteralPath $path -Force
+        return "$path|$($item.Length)|$($item.LastWriteTimeUtc.Ticks)"
+    }
+    $count = 0; $size = [int64]0; $newest = [int64]0
+    foreach ($file in (Get-ChildItem -LiteralPath $path -Recurse -File -Force)) {
+        $count++
+        $size += $file.Length
+        if ($file.LastWriteTimeUtc.Ticks -gt $newest) { $newest = $file.LastWriteTimeUtc.Ticks }
+    }
+    return "$path|dir|$count|$size|$newest"
+}
+
+# The clipboard content reduced to a short string: equal strings mean equal content.
+# Picks the kind in the same order as Save-ClipboardTo. $null when there is nothing we
+# could export, or when the clipboard can't be read right now.
+function Get-ClipboardSignature {
+    try {
+        if ([Windows.Forms.Clipboard]::ContainsFileDropList()) {
+            $parts = foreach ($p in @([Windows.Forms.Clipboard]::GetFileDropList())) { Get-PathFingerprint $p }
+            return 'files:' + ($parts -join "`n")
+        }
+        if ([Windows.Forms.Clipboard]::ContainsText()) {
+            return 'text:' + (Get-Sha256 $Utf8NoBom.GetBytes([Windows.Forms.Clipboard]::GetText()))
+        }
+        if ([Windows.Forms.Clipboard]::ContainsImage()) {
+            $img = [Windows.Forms.Clipboard]::GetImage()
+            $png = New-Object IO.MemoryStream
+            try {
+                $img.Save($png, [Drawing.Imaging.ImageFormat]::Png)
+                return 'image:' + (Get-Sha256 $png.ToArray())
+            } finally { $png.Dispose(); $img.Dispose() }
+        }
+    } catch {
+        Write-Log "could not fingerprint clipboard: $($_.Exception.Message)"
+    }
+    return $null
+}
+
 # Returns the clip kind written into $tmp, or $null when nothing exportable.
 function Save-ClipboardTo([string]$tmp) {
     if ([Windows.Forms.Clipboard]::ContainsFileDropList()) {
@@ -221,6 +267,11 @@ if ((Test-Path $LogFile) -and (Get-Item $LogFile).Length -gt $MaxLogBytes) {
 }
 Write-Log "listener started (limit $MaxMB MB)"
 $lastSeq = Get-ClipSeq
+# Signature of the content both machines already agree on: the last clip we exported,
+# imported, or deliberately skipped. Some apps rewrite the clipboard without changing
+# it (e.g. select-to-translate tools that back it up and restore it); that bumps the
+# sequence number, and without this check we would send the same clip all over again.
+$lastSig = Get-ClipboardSignature
 $ticks = 0
 $pendingId = $null       # Mac clip not yet on the clipboard (e.g. screen locked); newest wins
 $pendingLogged = $false
@@ -242,6 +293,7 @@ while ($true) {
                 Import-RemoteClip $pendingId
                 $pendingId = $null
                 $lastSeq = Get-ClipSeq          # our own change: don't echo back to the Mac
+                $lastSig = Get-ClipboardSignature
                 Remove-OldClips $Inbox
             } catch {
                 if ($pendingId -notmatch '^m\d+$') { $pendingId = $null; throw }
@@ -259,8 +311,16 @@ while ($true) {
             }
             Start-Sleep -Milliseconds $SettleMs   # let the source app finish writing all formats
             $lastSeq = Get-ClipSeq
-            Export-WinClip
-            Remove-OldClips $Outbox
+            $sig = Get-ClipboardSignature
+            if ($sig -and $sig -eq $lastSig) {
+                Write-Log 'skip: clipboard was rewritten with the same content'
+            } else {
+                Export-WinClip
+                # Remember it only if the clipboard still holds what we fingerprinted;
+                # a cancelled export leaves the sequence number ahead of $lastSeq.
+                if ((Get-ClipSeq) -eq $lastSeq) { $lastSig = $sig }
+                Remove-OldClips $Outbox
+            }
         }
         $ticks++
         if ($ticks % $ExpiryTicks -eq 0) {
