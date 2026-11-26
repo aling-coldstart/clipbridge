@@ -13,6 +13,8 @@ struct OutgoingClip {
     let fileURLs: [URL]
     /// Total size of `fileURLs` (0 for text and image clips).
     let bytes: Int64
+    /// Identifies the content; see `ClipSignature`.
+    let signature: String
 }
 
 enum CaptureResult {
@@ -60,28 +62,34 @@ func captureClip(from pb: NSPasteboard) throws -> CaptureResult {
     let fileURLs = (pb.readObjects(forClasses: [NSURL.self], options: options) as? [URL]) ?? []
 
     let kind: ClipKind
+    let signature: String
     var bytes: Int64 = 0
     try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     if !fileURLs.isEmpty {
         bytes = totalSize(of: fileURLs)
         if bytes > Config.maxFileBytes { try? FileManager.default.removeItem(at: dir); return .tooLarge(bytes) }
         kind = .files
+        signature = ClipSignature.files(fileURLs)
     } else if let text = pb.string(forType: .string), !text.isEmpty {
         try text.write(to: dir.appendingPathComponent("text.txt"), atomically: true, encoding: .utf8)
         kind = .text
+        signature = ClipSignature.text(text)
     } else if let png = pngData(from: pb) {
         try png.write(to: dir.appendingPathComponent("image.png"))
         kind = .image
+        signature = ClipSignature.image(png)
     } else {
         try? FileManager.default.removeItem(at: dir)
         return .skipped("no text, image or files")
     }
     try kind.rawValue.write(to: dir.appendingPathComponent("kind.txt"), atomically: true, encoding: .utf8)
-    return .clip(OutgoingClip(id: id, kind: kind, dir: dir, fileURLs: kind == .files ? fileURLs : [], bytes: bytes))
+    return .clip(OutgoingClip(id: id, kind: kind, dir: dir, fileURLs: kind == .files ? fileURLs : [], bytes: bytes,
+                              signature: signature))
 }
 
-/// Put a clip folder received from Windows onto the pasteboard. Returns its kind.
-func applyClip(at dir: URL, to pb: NSPasteboard) throws -> ClipKind {
+/// Put a clip folder received from Windows onto the pasteboard. Returns its kind and
+/// the signature of its content.
+func applyClip(at dir: URL, to pb: NSPasteboard) throws -> (kind: ClipKind, signature: String) {
     let raw = try String(contentsOf: dir.appendingPathComponent("kind.txt"), encoding: .utf8)
         .trimmingCharacters(in: .whitespacesAndNewlines)
     guard let kind = ClipKind(rawValue: raw) else { throw ClipError.badKind(raw) }
@@ -90,6 +98,7 @@ func applyClip(at dir: URL, to pb: NSPasteboard) throws -> ClipKind {
         let text = try String(contentsOf: dir.appendingPathComponent("text.txt"), encoding: .utf8)
         pb.clearContents()
         pb.setString(text, forType: .string)
+        return (kind, ClipSignature.text(text))
     case .image:
         let png = try Data(contentsOf: dir.appendingPathComponent("image.png"))
         guard let image = NSImage(data: png) else { throw ClipError.badImage }
@@ -97,14 +106,15 @@ func applyClip(at dir: URL, to pb: NSPasteboard) throws -> ClipKind {
         pb.declareTypes([.png, .tiff], owner: nil)
         pb.setData(png, forType: .png)
         if let tiff = image.tiffRepresentation { pb.setData(tiff, forType: .tiff) }
+        return (kind, ClipSignature.image(png))
     case .files:
         let urls = try FileManager.default.contentsOfDirectory(
             at: dir.appendingPathComponent("files"), includingPropertiesForKeys: nil)
         guard !urls.isEmpty else { throw ClipError.emptyFiles }
         pb.clearContents()
         pb.writeObjects(urls as [NSURL])
+        return (kind, ClipSignature.files(urls))
     }
-    return kind
 }
 
 enum ClipError: Error {

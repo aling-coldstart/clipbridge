@@ -80,7 +80,7 @@ powershell -File %USERPROFILE%\clipbridge\uninstall-windows.ps1
 - Windows 上必须由**桌面会话**里的进程读写剪贴板，因为 SSH 会话看不到桌面剪贴板，所以接收程序由计划任务在用户登录时启动。
 - 同一份剪贴板可能同时包含多种格式，取用顺序是：文件 > 文字 > 图片。例如从 Excel 复制单元格时，传过去的是文字，而不是截图。
 - 两端都有防回环机制：收到的内容不会被当成新的复制再传回去。
-- Windows 端会比对内容：有些软件（比如划词翻译）会在选中文字时把剪贴板原样重写一遍，内容没变就不会重新同步。所以想把完全相同的内容再发一次，需要先复制点别的。
+- 两端都会比对内容：有些软件会在你没有复制的时候改写剪贴板（比如划词翻译把选中的文字原样重写一遍，安全软件把复制的图片换成一个装着这张图的临时文件），内容没变就不会重新同步。所以想把完全相同的内容再发一次，需要先复制点别的。
 
 ## 文件位置
 
@@ -114,6 +114,12 @@ powershell -File %USERPROFILE%\clipbridge\uninstall-windows.ps1
 ```bash
 xcrun swiftc -O -o clipbridge mac/Sources/*.swift   # 编译 Mac 端
 CLIPBRIDGE_HOST=user@windows-ip ./clipbridge        # 前台运行，日志直接输出到终端
+```
+
+Mac 端内容比对的测试（不读写剪贴板）：
+
+```bash
+xcrun swiftc -o signature-tests mac/Sources/Signature.swift tests/signature.tests.swift && ./signature-tests
 ```
 
 Windows 端的测试会启动一个真实的 listener 并改写剪贴板，建议在 SSH 会话里运行（SSH 会话有独立的剪贴板，不影响桌面）：
