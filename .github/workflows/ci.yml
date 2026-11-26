@@ -17,6 +17,10 @@ jobs:
           set +e
           ./clipbridge; code=$?
           test "$code" -eq 64
+      - name: Signature tests
+        run: |
+          xcrun swiftc -o signature-tests mac/Sources/Signature.swift tests/signature.tests.swift
+          ./signature-tests
 
   lint-shell:
     runs-on: ubuntu-latest

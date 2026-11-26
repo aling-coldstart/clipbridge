@@ -30,6 +30,9 @@ final class ClipSync {
     private var ownCount = -1
     private var online = false
     private var pending: OutgoingClip?
+    /// What both clipboards hold now. Other apps rewrite the pasteboard with the content
+    /// it already has (e.g. a copied image turned into a temp file); that is not sent again.
+    private var synced = SyncedContent(maxAge: Config.clipMaxAge)
     /// A large Windows copy that was announced (SENDING) and whose clip hasn't arrived.
     private var announced: (bytes: Int64, token: Int)?
 
@@ -49,9 +52,12 @@ final class ClipSync {
 
     private func connected() {
         online = true
+        // This may be another PC, or the same one after a restart: it holds nothing of ours.
+        synced.forget()
         io.async { Remote.ensureListener() }
         if let clip = pending {
             pending = nil
+            synced.record(clip.signature)
             send(clip)
         }
     }
@@ -73,6 +79,12 @@ final class ClipSync {
             case .tooLarge(let size):
                 tooLarge(size, from: "Mac")
             case .clip(let clip):
+                if synced.isRepeat(clip.signature) {
+                    log("skip: pasteboard was rewritten with the same content")
+                    try? FileManager.default.removeItem(at: clip.dir)
+                    return
+                }
+                synced.record(clip.signature)
                 // The latest copy on either machine wins: drop any download from Windows.
                 _ = incoming.next()
                 if online {
@@ -129,6 +141,7 @@ final class ClipSync {
             // A new Windows copy supersedes any transfer in flight, in either direction.
             _ = incoming.next()
             _ = outgoing.next()
+            synced.forget()
             let token = panel.begin("从 Windows 接收 \(count) 个文件", detail: "Windows 准备中…（\(formatBytes(size))）")
             announced = (size, token)
             // If the clip never shows up (copy failed or replaced on Windows), don't spin forever.
@@ -144,6 +157,7 @@ final class ClipSync {
 
     private func clipArrived(_ id: String) {
         _ = outgoing.next()   // the latest copy on either machine wins
+        synced.forget()       // until the new clip is applied, the two clipboards differ
         let generation = incoming.next()
         let expected = announced
         announced = nil
@@ -174,10 +188,11 @@ final class ClipSync {
                 return
             }
             do {
-                let kind = try applyClip(at: dir, to: self.pb)
+                let applied = try applyClip(at: dir, to: self.pb)
                 self.ownCount = self.pb.changeCount
                 self.lastCount = self.ownCount
-                log("win -> mac: \(kind.rawValue) (\(id))")
+                self.synced.record(applied.signature)
+                log("win -> mac: \(applied.kind.rawValue) (\(id))")
                 if let expected { self.panel.finish(expected.token, "已到 Mac，可以粘贴了", succeeded: true) }
             } catch {
                 log("apply \(id) failed: \(error)")
